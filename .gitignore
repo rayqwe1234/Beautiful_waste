@@ -1,0 +1,7 @@
+target/
+release/
+.env
+.env.*
+*.log
+*.tmp
+Thumbs.db

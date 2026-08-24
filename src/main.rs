@@ -1,0 +1,1251 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use std::{
+    env, fs,
+    path::PathBuf,
+    sync::Arc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use bytemuck::{Pod, Zeroable};
+use chrono::{Datelike, Local, Timelike};
+use glyphon::{
+    Attrs, Buffer, Cache, Color as TextColor, Family, FontSystem, Metrics, Resolution, Shaping,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    cosmic_text::{Weight, Wrap},
+};
+use wgpu::{
+    CommandEncoderDescriptor, CompositeAlphaMode, DeviceDescriptor, Instance, InstanceDescriptor,
+    LoadOp, MultisampleState, Operations, PresentMode, RenderPassColorAttachment,
+    RenderPassDescriptor, RequestAdapterOptions, SurfaceColorSpace, SurfaceConfiguration,
+    TextureFormat, TextureUsages, TextureViewDescriptor,
+    util::{BufferInitDescriptor, DeviceExt},
+};
+use winit::{
+    application::ApplicationHandler,
+    dpi::{LogicalSize, PhysicalPosition},
+    event::{ElementState, MouseButton, WindowEvent},
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
+    keyboard::{Key, NamedKey},
+    window::{Fullscreen, Icon, Window},
+};
+
+const THOUGHTS: [&str; 24] = [
+    "此刻，不必成為任何人。",
+    "世界正在安靜地經過。",
+    "留白也是一種風景。",
+    "沒有目的，也可以很迷人。",
+    "讓時間替你呼吸。",
+    "今天的風，沒有要去哪裡。",
+    "光落下來，時間沒有聲音。",
+    "慢一點，也仍然會抵達。",
+    "窗外的雲正在替你發呆。",
+    "不必解釋每一段安靜。",
+    "把今天留一小塊給自己。",
+    "夜色知道如何擁抱城市。",
+    "有些答案，晚一點來也很好。",
+    "風景不需要被立刻命名。",
+    "現在這樣，就已經足夠。",
+    "讓心跳跟著光慢慢走。",
+    "每一次呼吸，都是一段留白。",
+    "世界很大，這一刻很小。",
+    "柔軟不是退讓，是選擇。",
+    "沒有安排的時間，也很珍貴。",
+    "把匆忙放在門外一會兒。",
+    "你可以只是看著光變化。",
+    "時間不是催促，它只是流動。",
+    "此刻正在成為一種風景。",
+];
+const WEEKDAYS: [&str; 7] = [
+    "星期日",
+    "星期一",
+    "星期二",
+    "星期三",
+    "星期四",
+    "星期五",
+    "星期六",
+];
+const STYLE_NAMES: [&str; 5] = ["SANS", "SERIF", "MONO", "ROUND", "THIN"];
+const THOUGHT_DURATION: f32 = 11.0;
+
+fn ease_opacity(value: f32) -> f32 {
+    let t = value.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn thought_visual(elapsed: f32) -> (usize, u8) {
+    let phase = elapsed % THOUGHT_DURATION;
+    let index = ((elapsed / THOUGHT_DURATION).floor() as usize) % THOUGHTS.len();
+    let fade_in = ease_opacity(phase / 0.85);
+    let fade_out = 1.0 - ease_opacity((phase - 10.0) / 1.0);
+    (index, (fade_in * fade_out * 230.0) as u8)
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Uniforms {
+    viewport: [f32; 4],
+    animation: [f32; 4],
+    controls: [f32; 4],
+    clock: [f32; 4],
+    state: [f32; 4],
+}
+
+#[derive(Clone, Copy, Default)]
+struct HitRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+impl HitRect {
+    fn contains(self, point: [f32; 2]) -> bool {
+        point[0] >= self.x
+            && point[0] <= self.x + self.w
+            && point[1] >= self.y
+            && point[1] <= self.y + self.h
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct UiLayout {
+    menu: HitRect,
+    menu_panel: HitRect,
+    style: HitRect,
+    speed: HitRect,
+    size: HitRect,
+    seconds: HitRect,
+    thoughts: HitRect,
+    fullscreen: HitRect,
+    previous: HitRect,
+    playback: HitRect,
+    next: HitRect,
+}
+impl UiLayout {
+    fn new(width: f32, height: f32, media_visible: bool, menu_open: bool) -> Self {
+        let panel_width = (width * 0.28).clamp(260.0, 320.0);
+        let mut layout = Self {
+            menu: HitRect {
+                x: 20.0,
+                y: 20.0,
+                w: 40.0,
+                h: 40.0,
+            },
+            menu_panel: HitRect {
+                x: 0.0,
+                y: 0.0,
+                w: panel_width,
+                h: height,
+            },
+            fullscreen: HitRect {
+                x: width - 60.0,
+                y: 20.0,
+                w: 40.0,
+                h: 40.0,
+            },
+            ..Default::default()
+        };
+        if menu_open {
+            layout.style = HitRect {
+                x: 24.0,
+                y: 166.0,
+                w: panel_width - 48.0,
+                h: 48.0,
+            };
+            layout.speed = HitRect {
+                x: 24.0,
+                y: 258.0,
+                w: panel_width - 48.0,
+                h: 56.0,
+            };
+            layout.size = HitRect {
+                x: 24.0,
+                y: 350.0,
+                w: panel_width - 48.0,
+                h: 56.0,
+            };
+            layout.seconds = HitRect {
+                x: 24.0,
+                y: 442.0,
+                w: panel_width - 48.0,
+                h: 56.0,
+            };
+            layout.thoughts = HitRect {
+                x: 24.0,
+                y: 534.0,
+                w: panel_width - 48.0,
+                h: 56.0,
+            };
+        }
+        if media_visible {
+            let mx = width - 145.0;
+            let my = height - 62.0;
+            layout.previous = HitRect {
+                x: mx,
+                y: my + 5.0,
+                w: 33.0,
+                h: 33.0,
+            };
+            layout.playback = HitRect {
+                x: mx + 35.0,
+                y: my + 2.5,
+                w: 38.0,
+                h: 38.0,
+            };
+            layout.next = HitRect {
+                x: mx + 75.0,
+                y: my + 5.0,
+                w: 33.0,
+                h: 33.0,
+            };
+        }
+        layout
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DragTarget {
+    Speed,
+    Size,
+}
+
+struct AppState {
+    started: Instant,
+    speed: f32,
+    clock_scale: f32,
+    show_seconds: bool,
+    show_thoughts: bool,
+    style: usize,
+    menu_open: bool,
+    menu_progress: f32,
+    last_frame: Instant,
+    fullscreen: bool,
+    media_state: u8,
+    cursor: [f32; 2],
+    drag: Option<DragTarget>,
+    dirty_text: bool,
+    last_second: u32,
+}
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            speed: 1.0,
+            clock_scale: 1.0,
+            show_seconds: false,
+            show_thoughts: true,
+            style: 0,
+            menu_open: false,
+            menu_progress: 0.0,
+            last_frame: Instant::now(),
+            fullscreen: false,
+            media_state: 0,
+            cursor: [0.0; 2],
+            drag: None,
+            dirty_text: true,
+            last_second: u32::MAX,
+        }
+    }
+}
+
+impl AppState {
+    fn load_from_disk() -> Self {
+        let mut state = Self::default();
+        let Some(path) = settings_path() else {
+            return state;
+        };
+        let Ok(contents) = fs::read_to_string(path) else {
+            return state;
+        };
+
+        for line in contents.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key.trim() {
+                "speed" => {
+                    if let Ok(speed) = value.trim().parse::<f32>() {
+                        state.speed = speed.clamp(0.25, 2.50);
+                    }
+                }
+                "clock_scale" => {
+                    if let Ok(scale) = value.trim().parse::<f32>() {
+                        state.clock_scale = scale.clamp(0.70, 1.35);
+                    }
+                }
+                "show_seconds" => state.show_seconds = value.trim() == "true",
+                "show_thoughts" => state.show_thoughts = value.trim() != "false",
+                "style" => {
+                    if let Ok(style) = value.trim().parse::<usize>() {
+                        state.style = style.min(STYLE_NAMES.len() - 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        state
+    }
+}
+
+fn settings_path() -> Option<PathBuf> {
+    let base = env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| env::current_dir().ok())?;
+    Some(base.join("Beautiful Waste").join("settings.ini"))
+}
+
+fn save_settings(state: &AppState) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let contents = format!(
+        "speed={:.4}\nclock_scale={:.4}\nshow_seconds={}\nshow_thoughts={}\nstyle={}\n",
+        state.speed, state.clock_scale, state.show_seconds, state.show_thoughts, state.style
+    );
+    let _ = fs::write(path, contents);
+}
+
+struct TextItem {
+    buffer: Buffer,
+    left: f32,
+    top: f32,
+    color: TextColor,
+}
+
+struct Renderer {
+    instance: Instance,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    surface: wgpu::Surface<'static>,
+    config: SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    uniform_buffer: wgpu::Buffer,
+    uniform_group: wgpu::BindGroup,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    text_items: Vec<TextItem>,
+    thought_text_item: Option<usize>,
+    thought_index: usize,
+    uniform: Uniforms,
+    logical_size: [f32; 2],
+    scale_factor: f32,
+    window: Arc<Window>,
+}
+
+impl Renderer {
+    async fn new(window: Arc<Window>, event_loop: &ActiveEventLoop) -> Self {
+        let physical = window.inner_size();
+        let scale_factor = window.scale_factor() as f32;
+        let instance = Instance::new(InstanceDescriptor::new_with_display_handle(Box::new(
+            event_loop.owned_display_handle(),
+        )));
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions::default())
+            .await
+            .unwrap();
+        let (device, queue) = adapter
+            .request_device(&DeviceDescriptor::default())
+            .await
+            .unwrap();
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create surface");
+        // Shader colors intentionally use the original CSS sRGB values directly.
+        let format = TextureFormat::Bgra8Unorm;
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: physical.width.max(1),
+            height: physical.height.max(1),
+            present_mode: PresentMode::Fifo,
+            alpha_mode: CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+            color_space: SurfaceColorSpace::Auto,
+        };
+        surface.configure(&device, &config);
+
+        let uniform = Uniforms::zeroed();
+        let uniform_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("visual uniforms"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let uniform_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("visual uniform layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let uniform_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("visual uniform group"),
+            layout: &uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("beautiful waste visual shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("visual.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("visual pipeline layout"),
+            bind_group_layouts: &[Some(&uniform_layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("visual pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, MultisampleState::default(), None);
+        Self {
+            instance,
+            device,
+            queue,
+            surface,
+            config,
+            pipeline,
+            uniform_buffer,
+            uniform_group,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            text_items: Vec::new(),
+            thought_text_item: None,
+            thought_index: usize::MAX,
+            uniform,
+            logical_size: [
+                physical.width as f32 / scale_factor,
+                physical.height as f32 / scale_factor,
+            ],
+            scale_factor,
+            window,
+        }
+    }
+
+    fn resize(&mut self, width: u32, height: u32, scale_factor: f32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.scale_factor = scale_factor;
+        self.logical_size = [width as f32 / scale_factor, height as f32 / scale_factor];
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    fn build_text(&mut self, state: &AppState) {
+        self.text_items.clear();
+        self.thought_text_item = None;
+        let [width, height] = self.logical_size;
+        let now = Local::now();
+        let central_scale = state.clock_scale;
+        let mut clock_size = (width * 0.1575).clamp(75.0, 184.0) * central_scale;
+        let (family, weight, spacing) = match state.style {
+            1 => (Family::Name("Times New Roman"), Weight::NORMAL, -0.055),
+            2 => {
+                clock_size = (width * 0.13).clamp(64.0, 152.0) * central_scale;
+                (Family::Name("Cascadia Mono"), Weight::LIGHT, -0.10)
+            }
+            3 => (Family::Name("Arial Rounded MT Bold"), Weight::BOLD, -0.08),
+            4 => (Family::Name("Segoe UI"), Weight::THIN, 0.01),
+            _ => (Family::Name("Segoe UI"), Weight::LIGHT, -0.06),
+        };
+        let clock_top = height * 0.5 - 47.0 - clock_size * 0.53;
+        let parts: Vec<String> = if state.show_seconds {
+            vec![
+                format!("{:02}", now.hour()),
+                format!("{:02}", now.minute()),
+                format!("{:02}", now.second()),
+            ]
+        } else {
+            vec![format!("{:02}", now.hour()), format!("{:02}", now.minute())]
+        };
+        let mut built = Vec::new();
+        for part in &parts {
+            built.push(make_text(
+                &mut self.font_system,
+                part,
+                clock_size,
+                clock_size * 0.92,
+                family,
+                weight,
+                spacing,
+            ));
+        }
+        let sep_width = clock_size * 0.23;
+        let total =
+            built.iter().map(|(_, w)| *w).sum::<f32>() + sep_width * (built.len() - 1) as f32;
+        let mut x = width * 0.5 - total * 0.5;
+        for (index, (buffer, item_width)) in built.into_iter().enumerate() {
+            self.text_items.push(TextItem {
+                buffer,
+                left: x,
+                top: clock_top,
+                color: TextColor::rgba(245, 240, 235, 246),
+            });
+            x += item_width;
+            if index + 1 < parts.len() {
+                x += sep_width;
+            }
+        }
+
+        let eyebrow_size = (10.5 * central_scale).clamp(8.0, 13.0);
+        self.push_centered(
+            "A BEAUTIFUL WASTE OF TIME",
+            width * 0.5,
+            clock_top - 28.0 * central_scale,
+            eyebrow_size,
+            "Segoe UI",
+            Weight::MEDIUM,
+            0.38,
+            TextColor::rgba(245, 240, 235, 132),
+        );
+        let date_y = clock_top + clock_size + 8.0 * central_scale;
+        let weekday = WEEKDAYS[now.weekday().num_days_from_sunday() as usize];
+        self.push_centered(
+            &format!(
+                "{} 年 {:02} 月 {:02} 日　{}",
+                now.year(),
+                now.month(),
+                now.day(),
+                weekday
+            ),
+            width * 0.5,
+            date_y,
+            (16.0 * central_scale).clamp(12.0, 20.0),
+            "HarmonyOS Sans SC",
+            Weight::NORMAL,
+            0.19,
+            TextColor::rgba(245, 240, 235, 190),
+        );
+        let line_y = date_y + 62.0 * central_scale;
+        let (thought_index, alpha) = thought_visual(state.started.elapsed().as_secs_f32());
+        if state.show_thoughts {
+            let thought_text_item = self.text_items.len();
+            self.push_centered(
+                THOUGHTS[thought_index],
+                width * 0.5,
+                line_y + 40.0 * central_scale,
+                (19.0 * central_scale).clamp(14.0, 24.0),
+                "HarmonyOS Sans SC",
+                Weight::NORMAL,
+                0.17,
+                TextColor::rgba(245, 240, 235, alpha),
+            );
+            self.thought_text_item = Some(thought_text_item);
+        }
+        self.thought_index = thought_index;
+
+        let layout = UiLayout::new(width, height, state.media_state > 0, true);
+        let menu_offset = (state.menu_progress - 1.0) * (width * 0.28).clamp(260.0, 320.0);
+        if state.menu_open || state.menu_progress > 0.001 {
+            let menu_color = TextColor::rgba(245, 240, 235, 212);
+            self.push_text(
+                "SETTINGS",
+                25.0 + menu_offset,
+                80.0,
+                20.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                "CLOCK STYLE",
+                25.0 + menu_offset,
+                144.0,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.24,
+                menu_color,
+            );
+            self.push_centered(
+                STYLE_NAMES[state.style],
+                layout.style.x + layout.style.w * 0.5 + menu_offset,
+                183.0,
+                11.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.34,
+                menu_color,
+            );
+            self.push_text(
+                "ANIMATION SPEED",
+                25.0 + menu_offset,
+                236.0,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_right(
+                &format!("{:.2}×", state.speed),
+                layout.speed.x + layout.speed.w - 24.0 + menu_offset,
+                236.0,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_text(
+                "CLOCK SIZE",
+                25.0 + menu_offset,
+                328.0,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_right(
+                &format!("{:.0}%", state.clock_scale * 100.0),
+                layout.size.x + layout.size.w - 24.0 + menu_offset,
+                328.0,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_text(
+                "SHOW SECONDS",
+                25.0 + menu_offset,
+                420.0,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                if state.show_seconds { "ON" } else { "OFF" },
+                layout.seconds.x + 18.0 + menu_offset,
+                458.0,
+                13.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                menu_color,
+            );
+            self.push_text(
+                "SHOW THOUGHTS",
+                25.0 + menu_offset,
+                512.0,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                if state.show_thoughts { "ON" } else { "OFF" },
+                layout.thoughts.x + 18.0 + menu_offset,
+                550.0,
+                13.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                menu_color,
+            );
+        }
+
+        self.uniform.clock = [clock_top, clock_size, 0.0, 0.0];
+        self.uniform.state = [
+            if state.show_thoughts { line_y } else { -1000.0 },
+            central_scale,
+            if state.show_thoughts { 1.0 } else { 0.0 },
+            state.menu_progress,
+        ];
+    }
+
+    fn push_centered(
+        &mut self,
+        text: &str,
+        center_x: f32,
+        top: f32,
+        size: f32,
+        family: &str,
+        weight: Weight,
+        spacing: f32,
+        color: TextColor,
+    ) {
+        let (buffer, width) = make_text(
+            &mut self.font_system,
+            text,
+            size,
+            size * 1.22,
+            Family::Name(family),
+            weight,
+            spacing,
+        );
+        self.text_items.push(TextItem {
+            buffer,
+            left: center_x - width * 0.5,
+            top,
+            color,
+        });
+    }
+    fn push_text(
+        &mut self,
+        text: &str,
+        left: f32,
+        top: f32,
+        size: f32,
+        family: &str,
+        weight: Weight,
+        spacing: f32,
+        color: TextColor,
+    ) {
+        let (buffer, _) = make_text(
+            &mut self.font_system,
+            text,
+            size,
+            size * 1.22,
+            Family::Name(family),
+            weight,
+            spacing,
+        );
+        self.text_items.push(TextItem {
+            buffer,
+            left,
+            top,
+            color,
+        });
+    }
+
+    fn push_right(
+        &mut self,
+        text: &str,
+        right: f32,
+        top: f32,
+        size: f32,
+        family: &str,
+        weight: Weight,
+        spacing: f32,
+        color: TextColor,
+    ) {
+        let (buffer, width) = make_text(
+            &mut self.font_system,
+            text,
+            size,
+            size * 1.22,
+            Family::Name(family),
+            weight,
+            spacing,
+        );
+        self.text_items.push(TextItem {
+            buffer,
+            left: right - width,
+            top,
+            color,
+        });
+    }
+
+    fn render(&mut self, state: &mut AppState) {
+        let frame_time = Instant::now();
+        let delta = frame_time
+            .duration_since(state.last_frame)
+            .as_secs_f32()
+            .min(0.10);
+        state.last_frame = frame_time;
+        let menu_target = if state.menu_open { 1.0 } else { 0.0 };
+        if (state.menu_progress - menu_target).abs() > 0.001 {
+            let smoothing = 1.0 - (-14.0 * delta).exp();
+            state.menu_progress += (menu_target - state.menu_progress) * smoothing;
+            state.dirty_text = true;
+        } else {
+            state.menu_progress = menu_target;
+        }
+
+        let now = Local::now();
+        let elapsed = state.started.elapsed().as_secs_f32();
+        let (thought_index, thought_alpha) = thought_visual(elapsed);
+        if now.second() != state.last_second {
+            state.last_second = now.second();
+            state.dirty_text = true;
+        }
+        if state.show_thoughts && thought_index != self.thought_index {
+            state.dirty_text = true;
+        }
+        if state.dirty_text {
+            self.build_text(state);
+            state.dirty_text = false;
+        }
+        if state.show_thoughts
+            && let Some(item) = self
+                .thought_text_item
+                .and_then(|index| self.text_items.get_mut(index))
+        {
+            item.color = TextColor::rgba(245, 240, 235, thought_alpha);
+        }
+        let speed_norm = (state.speed - 0.25) / 2.25;
+        let size_norm = (state.clock_scale - 0.70) / 0.65;
+        self.uniform.viewport = [
+            self.config.width as f32,
+            self.config.height as f32,
+            self.logical_size[0],
+            self.logical_size[1],
+        ];
+        self.uniform.animation = [
+            elapsed,
+            state.speed,
+            self.scale_factor,
+            if state.show_seconds { 1.0 } else { 0.0 },
+        ];
+        self.uniform.controls = [
+            speed_norm,
+            size_norm,
+            state.media_state as f32,
+            if state.fullscreen { 1.0 } else { 0.0 },
+        ];
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniform));
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        let scale = self.scale_factor;
+        let bounds = TextBounds {
+            left: 0,
+            top: 0,
+            right: self.config.width as i32,
+            bottom: self.config.height as i32,
+        };
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                self.text_items.iter().map(|item| TextArea {
+                    buffer: &item.buffer,
+                    left: item.left * scale,
+                    top: item.top * scale,
+                    scale,
+                    bounds,
+                    default_color: item.color,
+                    custom_glyphs: &[],
+                }),
+                &mut self.swash_cache,
+            )
+            .expect("prepare text");
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface = self.instance.create_surface(self.window.clone()).unwrap();
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Validation => panic!("surface validation error"),
+        };
+        let view = frame.texture.create_view(&TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("frame encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("frame pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.uniform_group, &[]);
+            pass.draw(0..3, 0..1);
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .expect("render text");
+        }
+        self.queue.submit(Some(encoder.finish()));
+        self.queue.present(frame);
+        self.atlas.trim();
+        self.window.request_redraw();
+    }
+}
+
+fn make_text(
+    font_system: &mut FontSystem,
+    text: &str,
+    size: f32,
+    line_height: f32,
+    family: Family<'_>,
+    weight: Weight,
+    spacing: f32,
+) -> (Buffer, f32) {
+    let mut buffer = Buffer::new(font_system, Metrics::new(size, line_height));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(Some(2400.0), Some(line_height * 1.5));
+    buffer.set_text(
+        text,
+        &Attrs::new()
+            .family(family)
+            .weight(weight)
+            .letter_spacing(spacing),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max);
+    (buffer, width)
+}
+
+#[derive(Debug)]
+enum UserEvent {
+    Media(u8),
+}
+
+struct Application {
+    renderer: Option<Renderer>,
+    state: AppState,
+    proxy: EventLoopProxy<UserEvent>,
+}
+
+impl Application {
+    fn interact(&mut self, pressed: bool) {
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        let layout = UiLayout::new(
+            renderer.logical_size[0],
+            renderer.logical_size[1],
+            self.state.media_state > 0,
+            self.state.menu_open,
+        );
+        if !pressed {
+            if self.state.drag.take().is_some() {
+                save_settings(&self.state);
+            }
+            return;
+        }
+        let p = self.state.cursor;
+        let mut settings_changed = false;
+        if layout.menu.contains(p) {
+            self.state.menu_open = !self.state.menu_open;
+            self.state.dirty_text = true;
+        } else if layout.style.contains(p) {
+            self.state.style = (self.state.style + 1) % STYLE_NAMES.len();
+            self.state.dirty_text = true;
+            settings_changed = true;
+        } else if layout.seconds.contains(p) {
+            self.state.show_seconds = !self.state.show_seconds;
+            self.state.dirty_text = true;
+            settings_changed = true;
+        } else if layout.thoughts.contains(p) {
+            self.state.show_thoughts = !self.state.show_thoughts;
+            self.state.dirty_text = true;
+            settings_changed = true;
+        } else if layout.fullscreen.contains(p) {
+            self.state.fullscreen = !self.state.fullscreen;
+            renderer.window.set_fullscreen(
+                self.state
+                    .fullscreen
+                    .then_some(Fullscreen::Borderless(None)),
+            );
+        } else if layout.speed.contains(p) {
+            self.state.drag = Some(DragTarget::Speed);
+            update_slider(&mut self.state, layout, p);
+        } else if layout.size.contains(p) {
+            self.state.drag = Some(DragTarget::Size);
+            update_slider(&mut self.state, layout, p);
+        } else if layout.previous.contains(p) {
+            send_media_key(MediaKey::Previous)
+        } else if layout.playback.contains(p) {
+            send_media_key(MediaKey::Toggle)
+        } else if layout.next.contains(p) {
+            send_media_key(MediaKey::Next)
+        } else if self.state.menu_open && !layout.menu_panel.contains(p) {
+            self.state.menu_open = false;
+            self.state.dirty_text = true;
+        }
+        if settings_changed {
+            save_settings(&self.state);
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for Application {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.renderer.is_some() {
+            return;
+        }
+        let mut attrs = Window::default_attributes()
+            .with_title("美丽的废物 · Beautiful Waste")
+            .with_inner_size(LogicalSize::new(1280.0, 800.0))
+            .with_min_inner_size(LogicalSize::new(520.0, 620.0));
+        if let Some(icon) = load_icon() {
+            attrs = attrs.with_window_icon(Some(icon));
+        }
+        let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        self.renderer = Some(pollster::block_on(Renderer::new(window, event_loop)));
+        start_media_monitor(self.proxy.clone());
+    }
+
+    fn user_event(&mut self, _: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Media(value) => {
+                self.state.media_state = value;
+                self.state.dirty_text = true;
+            }
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        _: winit::window::WindowId,
+        event: WindowEvent,
+    ) {
+        let Some(renderer) = &mut self.renderer else {
+            return;
+        };
+        match event {
+            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Resized(size) => {
+                renderer.resize(
+                    size.width,
+                    size.height,
+                    renderer.window.scale_factor() as f32,
+                );
+                self.state.dirty_text = true;
+                renderer.window.request_redraw();
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                let size = renderer.window.inner_size();
+                renderer.resize(size.width, size.height, scale_factor as f32);
+                self.state.dirty_text = true;
+            }
+            WindowEvent::CursorMoved {
+                position: PhysicalPosition { x, y },
+                ..
+            } => {
+                self.state.cursor = [
+                    x as f32 / renderer.scale_factor,
+                    y as f32 / renderer.scale_factor,
+                ];
+                if self.state.drag.is_some() {
+                    let layout = UiLayout::new(
+                        renderer.logical_size[0],
+                        renderer.logical_size[1],
+                        self.state.media_state > 0,
+                        self.state.menu_open,
+                    );
+                    let cursor = self.state.cursor;
+                    update_slider(&mut self.state, layout, cursor);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => self.interact(state == ElementState::Pressed),
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                match event.logical_key {
+                    Key::Character(ref value) if value.eq_ignore_ascii_case("s") => {
+                        self.state.style = (self.state.style + 1) % STYLE_NAMES.len();
+                        self.state.dirty_text = true;
+                        save_settings(&self.state);
+                    }
+                    Key::Named(NamedKey::Escape) if self.state.fullscreen => {
+                        self.state.fullscreen = false;
+                        renderer.window.set_fullscreen(None);
+                    }
+                    _ => {}
+                }
+            }
+            WindowEvent::RedrawRequested => renderer.render(&mut self.state),
+            _ => {}
+        }
+    }
+}
+
+fn update_slider(state: &mut AppState, layout: UiLayout, point: [f32; 2]) {
+    match state.drag {
+        Some(DragTarget::Speed) => {
+            let t =
+                ((point[0] - (layout.speed.x + 18.0)) / (layout.speed.w - 36.0)).clamp(0.0, 1.0);
+            state.speed = 0.25 + t * 2.25;
+        }
+        Some(DragTarget::Size) => {
+            let t = ((point[0] - (layout.size.x + 18.0)) / (layout.size.w - 36.0)).clamp(0.0, 1.0);
+            state.clock_scale = 0.70 + t * 0.65;
+            state.dirty_text = true;
+        }
+        None => {}
+    }
+}
+
+fn load_icon() -> Option<Icon> {
+    let image = image::load_from_memory(include_bytes!("../icon.ico"))
+        .ok()?
+        .into_rgba8();
+    let (w, h) = image.dimensions();
+    Icon::from_rgba(image.into_raw(), w, h).ok()
+}
+
+fn start_media_monitor(proxy: EventLoopProxy<UserEvent>) {
+    thread::spawn(move || {
+        #[cfg(target_os = "windows")]
+        unsafe {
+            let _ = windows::Win32::System::Com::CoInitializeEx(
+                None,
+                windows::Win32::System::Com::COINIT_MULTITHREADED,
+            );
+        }
+        let mut old = u8::MAX;
+        loop {
+            let value = query_media_state();
+            if value != old {
+                let _ = proxy.send_event(UserEvent::Media(value));
+                old = value;
+            }
+            thread::sleep(Duration::from_millis(750));
+        }
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn query_media_state() -> u8 {
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSessionManager as Manager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
+    };
+    let Ok(op) = Manager::RequestAsync() else {
+        return 0;
+    };
+    let Ok(manager) = op.get() else { return 0 };
+    let Ok(session) = manager.GetCurrentSession() else {
+        return 0;
+    };
+    let Ok(info) = session.GetPlaybackInfo() else {
+        return 0;
+    };
+    let Ok(status) = info.PlaybackStatus() else {
+        return 0;
+    };
+    if status == Status::Playing {
+        2
+    } else if status == Status::Paused || status == Status::Stopped {
+        1
+    } else {
+        0
+    }
+}
+#[cfg(not(target_os = "windows"))]
+fn query_media_state() -> u8 {
+    0
+}
+
+enum MediaKey {
+    Previous,
+    Toggle,
+    Next,
+}
+#[cfg(target_os = "windows")]
+fn send_media_key(key: MediaKey) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE,
+        VK_MEDIA_PREV_TRACK, keybd_event,
+    };
+    let code = match key {
+        MediaKey::Previous => VK_MEDIA_PREV_TRACK,
+        MediaKey::Toggle => VK_MEDIA_PLAY_PAUSE,
+        MediaKey::Next => VK_MEDIA_NEXT_TRACK,
+    };
+    unsafe {
+        keybd_event(code.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+        keybd_event(code.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+    }
+}
+#[cfg(not(target_os = "windows"))]
+fn send_media_key(_: MediaKey) {}
+
+fn main() {
+    let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
+    let proxy = event_loop.create_proxy();
+    let mut app = Application {
+        renderer: None,
+        state: AppState::load_from_disk(),
+        proxy,
+    };
+    event_loop.run_app(&mut app).unwrap();
+}
