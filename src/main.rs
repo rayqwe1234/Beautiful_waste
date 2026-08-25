@@ -25,7 +25,7 @@ use wgpu::{
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
     window::{Fullscreen, Icon, Window},
@@ -67,6 +67,7 @@ const WEEKDAYS: [&str; 7] = [
     "星期六",
 ];
 const STYLE_NAMES: [&str; 5] = ["SANS", "SERIF", "MONO", "ROUND", "THIN"];
+const DATE_FORMAT_NAMES: [&str; 3] = ["CHINESE", "ISO", "SLASH"];
 const THOUGHT_DURATION: f32 = 11.0;
 
 fn ease_opacity(value: f32) -> f32 {
@@ -74,11 +75,21 @@ fn ease_opacity(value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-fn thought_visual(elapsed: f32) -> (usize, u8) {
-    let phase = elapsed % THOUGHT_DURATION;
-    let index = ((elapsed / THOUGHT_DURATION).floor() as usize) % THOUGHTS.len();
+fn thought_visual(elapsed: f32, duration: f32, count: usize, random: bool) -> (usize, u8) {
+    let duration = duration.max(3.0);
+    let phase = elapsed % duration;
+    let cycle = (elapsed / duration).floor() as u64;
+    let count = count.max(1);
+    let index = if random {
+        let mut value = cycle.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        value = (value ^ (value >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((value ^ (value >> 31)) as usize) % count
+    } else {
+        cycle as usize % count
+    };
     let fade_in = ease_opacity(phase / 0.85);
-    let fade_out = 1.0 - ease_opacity((phase - 10.0) / 1.0);
+    let fade_out = 1.0 - ease_opacity((phase - (duration - 1.0)) / 1.0);
     (index, (fade_in * fade_out * 230.0) as u8)
 }
 
@@ -115,8 +126,19 @@ struct UiLayout {
     style: HitRect,
     speed: HitRect,
     size: HitRect,
+    time_format: HitRect,
     seconds: HitRect,
+    date_format: HitRect,
     thoughts: HitRect,
+    thought_interval: HitRect,
+    thought_order: HitRect,
+    thought_input: HitRect,
+    thought_prev: HitRect,
+    thought_delete: HitRect,
+    thought_next: HitRect,
+    thought_add: HitRect,
+    thought_import: HitRect,
+    delete_user_files: HitRect,
     fullscreen: HitRect,
     previous: HitRect,
     playback: HitRect,
@@ -148,34 +170,102 @@ impl UiLayout {
         };
         if menu_open {
             layout.style = HitRect {
-                x: 24.0,
-                y: 166.0,
-                w: panel_width - 48.0,
-                h: 48.0,
+                x: 36.0,
+                y: 196.0,
+                w: panel_width - 72.0,
+                h: 40.0,
+            };
+            layout.size = HitRect {
+                x: 36.0,
+                y: 270.0,
+                w: panel_width - 72.0,
+                h: 56.0,
+            };
+            layout.time_format = HitRect {
+                x: 36.0,
+                y: 362.0,
+                w: panel_width - 72.0,
+                h: 42.0,
+            };
+            layout.seconds = HitRect {
+                x: 36.0,
+                y: 442.0,
+                w: panel_width - 72.0,
+                h: 42.0,
+            };
+            layout.date_format = HitRect {
+                x: 36.0,
+                y: 520.0,
+                w: panel_width - 72.0,
+                h: 42.0,
             };
             layout.speed = HitRect {
                 x: 24.0,
-                y: 258.0,
-                w: panel_width - 48.0,
-                h: 56.0,
-            };
-            layout.size = HitRect {
-                x: 24.0,
-                y: 350.0,
-                w: panel_width - 48.0,
-                h: 56.0,
-            };
-            layout.seconds = HitRect {
-                x: 24.0,
-                y: 442.0,
+                y: 614.0,
                 w: panel_width - 48.0,
                 h: 56.0,
             };
             layout.thoughts = HitRect {
-                x: 24.0,
-                y: 534.0,
-                w: panel_width - 48.0,
+                x: 36.0,
+                y: 747.0,
+                w: panel_width - 72.0,
+                h: 42.0,
+            };
+            layout.thought_interval = HitRect {
+                x: 36.0,
+                y: 822.0,
+                w: panel_width - 72.0,
                 h: 56.0,
+            };
+            layout.thought_order = HitRect {
+                x: 36.0,
+                y: 910.0,
+                w: panel_width - 72.0,
+                h: 42.0,
+            };
+            let library_button_width = (panel_width - 88.0) / 3.0;
+            layout.thought_prev = HitRect {
+                x: 36.0,
+                y: 1059.0,
+                w: library_button_width,
+                h: 42.0,
+            };
+            layout.thought_delete = HitRect {
+                x: 44.0 + library_button_width,
+                y: 1059.0,
+                w: library_button_width,
+                h: 42.0,
+            };
+            layout.thought_next = HitRect {
+                x: 52.0 + library_button_width * 2.0,
+                y: 1059.0,
+                w: library_button_width,
+                h: 42.0,
+            };
+            layout.thought_input = HitRect {
+                x: 36.0,
+                y: 1143.0,
+                w: panel_width - 72.0,
+                h: 56.0,
+            };
+            let button_width = (panel_width - 84.0) * 0.5;
+            layout.thought_add = HitRect {
+                x: 36.0,
+                y: 1205.0,
+                w: button_width,
+                h: 44.0,
+            };
+            layout.thought_import = HitRect {
+                x: 48.0 + button_width,
+                y: 1205.0,
+                w: button_width,
+                h: 44.0,
+            };
+            layout.delete_user_files = HitRect {
+                x: 24.0,
+                y: 1321.0,
+                w: panel_width - 48.0,
+                h: 52.0,
             };
         }
         if media_visible {
@@ -208,14 +298,33 @@ impl UiLayout {
 enum DragTarget {
     Speed,
     Size,
+    ThoughtInterval,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DeleteStatus {
+    Idle,
+    Armed,
+    Deleted,
+    Failed,
 }
 
 struct AppState {
     started: Instant,
     speed: f32,
     clock_scale: f32,
+    use_24h: bool,
     show_seconds: bool,
+    date_format: usize,
     show_thoughts: bool,
+    thought_duration: f32,
+    thought_random: bool,
+    thoughts: Vec<String>,
+    thought_selected: usize,
+    thought_draft: String,
+    editing_thought: bool,
+    control_down: bool,
+    menu_scroll: f32,
     style: usize,
     menu_open: bool,
     menu_progress: f32,
@@ -224,6 +333,8 @@ struct AppState {
     media_state: u8,
     cursor: [f32; 2],
     drag: Option<DragTarget>,
+    delete_status: DeleteStatus,
+    delete_status_until: Option<Instant>,
     dirty_text: bool,
     last_second: u32,
 }
@@ -233,8 +344,18 @@ impl Default for AppState {
             started: Instant::now(),
             speed: 1.0,
             clock_scale: 1.0,
+            use_24h: true,
             show_seconds: false,
+            date_format: 0,
             show_thoughts: true,
+            thought_duration: THOUGHT_DURATION,
+            thought_random: false,
+            thoughts: THOUGHTS.iter().map(|item| (*item).to_owned()).collect(),
+            thought_selected: 0,
+            thought_draft: String::new(),
+            editing_thought: false,
+            control_down: false,
+            menu_scroll: 0.0,
             style: 0,
             menu_open: false,
             menu_progress: 0.0,
@@ -243,6 +364,8 @@ impl Default for AppState {
             media_state: 0,
             cursor: [0.0; 2],
             drag: None,
+            delete_status: DeleteStatus::Idle,
+            delete_status_until: None,
             dirty_text: true,
             last_second: u32::MAX,
         }
@@ -252,36 +375,69 @@ impl Default for AppState {
 impl AppState {
     fn load_from_disk() -> Self {
         let mut state = Self::default();
-        let Some(path) = settings_path() else {
-            return state;
-        };
-        let Ok(contents) = fs::read_to_string(path) else {
-            return state;
-        };
-
-        for line in contents.lines() {
-            let Some((key, value)) = line.split_once('=') else {
-                continue;
-            };
-            match key.trim() {
-                "speed" => {
-                    if let Ok(speed) = value.trim().parse::<f32>() {
-                        state.speed = speed.clamp(0.25, 2.50);
+        if let Some(path) = settings_path()
+            && let Ok(contents) = fs::read_to_string(path)
+        {
+            for line in contents.lines() {
+                let Some((key, value)) = line.split_once('=') else {
+                    continue;
+                };
+                match key.trim() {
+                    "speed" => {
+                        if let Ok(speed) = value.trim().parse::<f32>() {
+                            state.speed = speed.clamp(0.25, 2.50);
+                        }
+                    }
+                    "clock_scale" => {
+                        if let Ok(scale) = value.trim().parse::<f32>() {
+                            state.clock_scale = scale.clamp(0.70, 1.35);
+                        }
+                    }
+                    "use_24h" => state.use_24h = value.trim() != "false",
+                    "show_seconds" => state.show_seconds = value.trim() == "true",
+                    "date_format" => {
+                        if let Ok(format) = value.trim().parse::<usize>() {
+                            state.date_format = format.min(DATE_FORMAT_NAMES.len() - 1);
+                        }
+                    }
+                    "show_thoughts" => state.show_thoughts = value.trim() != "false",
+                    "thought_duration" => {
+                        if let Ok(duration) = value.trim().parse::<f32>() {
+                            state.thought_duration = duration.clamp(6.0, 30.0);
+                        }
+                    }
+                    "thought_random" => state.thought_random = value.trim() == "true",
+                    "style" => {
+                        if let Ok(style) = value.trim().parse::<usize>() {
+                            state.style = style.min(STYLE_NAMES.len() - 1);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(path) = thoughts_path()
+            && let Ok(contents) = fs::read_to_string(path)
+        {
+            let versioned = contents.lines().next() == Some("# Beautiful Waste phrases v2");
+            let loaded: Vec<String> = contents
+                .lines()
+                .skip(if versioned { 1 } else { 0 })
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .take(200)
+                .map(ToOwned::to_owned)
+                .collect();
+            if versioned {
+                if !loaded.is_empty() {
+                    state.thoughts = loaded;
+                }
+            } else {
+                for phrase in loaded {
+                    if !state.thoughts.iter().any(|item| item == &phrase) {
+                        state.thoughts.push(phrase);
                     }
                 }
-                "clock_scale" => {
-                    if let Ok(scale) = value.trim().parse::<f32>() {
-                        state.clock_scale = scale.clamp(0.70, 1.35);
-                    }
-                }
-                "show_seconds" => state.show_seconds = value.trim() == "true",
-                "show_thoughts" => state.show_thoughts = value.trim() != "false",
-                "style" => {
-                    if let Ok(style) = value.trim().parse::<usize>() {
-                        state.style = style.min(STYLE_NAMES.len() - 1);
-                    }
-                }
-                _ => {}
             }
         }
         state
@@ -295,6 +451,10 @@ fn settings_path() -> Option<PathBuf> {
     Some(base.join("Beautiful Waste").join("settings.ini"))
 }
 
+fn thoughts_path() -> Option<PathBuf> {
+    settings_path().and_then(|path| path.parent().map(|parent| parent.join("thoughts.txt")))
+}
+
 fn save_settings(state: &AppState) {
     let Some(path) = settings_path() else {
         return;
@@ -306,10 +466,168 @@ fn save_settings(state: &AppState) {
         return;
     }
     let contents = format!(
-        "speed={:.4}\nclock_scale={:.4}\nshow_seconds={}\nshow_thoughts={}\nstyle={}\n",
-        state.speed, state.clock_scale, state.show_seconds, state.show_thoughts, state.style
+        "speed={:.4}\nclock_scale={:.4}\nuse_24h={}\nshow_seconds={}\ndate_format={}\nshow_thoughts={}\nthought_duration={:.2}\nthought_random={}\nstyle={}\n",
+        state.speed,
+        state.clock_scale,
+        state.use_24h,
+        state.show_seconds,
+        state.date_format,
+        state.show_thoughts,
+        state.thought_duration,
+        state.thought_random,
+        state.style
     );
     let _ = fs::write(path, contents);
+}
+
+fn save_thoughts(state: &AppState) {
+    let Some(path) = thoughts_path() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let mut contents = "# Beautiful Waste phrases v2\n".to_owned();
+    contents.push_str(&state.thoughts.join("\n"));
+    contents.push('\n');
+    let _ = fs::write(path, contents);
+}
+
+fn remove_user_file(path: &PathBuf) -> bool {
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+    }
+}
+
+fn delete_user_files(state: &mut AppState) -> bool {
+    let settings = settings_path();
+    let thoughts = thoughts_path();
+    let settings_deleted = settings.as_ref().is_none_or(remove_user_file);
+    let thoughts_deleted = thoughts.as_ref().is_none_or(remove_user_file);
+    let deleted = settings_deleted && thoughts_deleted;
+
+    if deleted {
+        let defaults = AppState::default();
+        state.speed = defaults.speed;
+        state.clock_scale = defaults.clock_scale;
+        state.use_24h = defaults.use_24h;
+        state.show_seconds = defaults.show_seconds;
+        state.date_format = defaults.date_format;
+        state.show_thoughts = defaults.show_thoughts;
+        state.thought_duration = defaults.thought_duration;
+        state.thought_random = defaults.thought_random;
+        state.thoughts = defaults.thoughts;
+        state.thought_selected = 0;
+        state.thought_draft.clear();
+        state.editing_thought = false;
+        state.style = defaults.style;
+        state.drag = None;
+
+        if let Some(parent) = settings.and_then(|path| path.parent().map(PathBuf::from)) {
+            let _ = fs::remove_dir(parent);
+        }
+    }
+
+    state.dirty_text = true;
+    deleted
+}
+
+#[cfg(target_os = "windows")]
+fn clipboard_text() -> Option<String> {
+    use windows::Win32::{
+        Foundation::HGLOBAL,
+        System::{
+            DataExchange::{CloseClipboard, GetClipboardData, OpenClipboard},
+            Memory::{GlobalLock, GlobalUnlock},
+        },
+    };
+
+    unsafe {
+        OpenClipboard(None).ok()?;
+        let text = (|| {
+            let handle = GetClipboardData(13).ok()?;
+            let memory = HGLOBAL(handle.0);
+            let pointer = GlobalLock(memory) as *const u16;
+            if pointer.is_null() {
+                return None;
+            }
+            let mut length = 0usize;
+            while length < 4096 && *pointer.add(length) != 0 {
+                length += 1;
+            }
+            let text = String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length));
+            let _ = GlobalUnlock(memory);
+            Some(text)
+        })();
+        let _ = CloseClipboard();
+        text
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_text() -> Option<String> {
+    None
+}
+
+fn append_thought_draft(state: &mut AppState, text: &str) {
+    for character in text.chars() {
+        if !character.is_control() && state.thought_draft.chars().count() < 20 {
+            state.thought_draft.push(character);
+        }
+    }
+    state.dirty_text = true;
+}
+
+fn commit_thought(state: &mut AppState) {
+    let phrase = state.thought_draft.trim().to_owned();
+    if !phrase.is_empty() && !state.thoughts.iter().any(|item| item == &phrase) {
+        state.thoughts.push(phrase);
+        state.thought_selected = state.thoughts.len() - 1;
+        save_thoughts(state);
+    }
+    state.thought_draft.clear();
+    state.dirty_text = true;
+}
+
+fn import_thoughts_from_txt(state: &mut AppState) {
+    let Some(path) = rfd::FileDialog::new()
+        .add_filter("Text files", &["txt"])
+        .set_title("Import phrases")
+        .pick_file()
+    else {
+        return;
+    };
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    let first_new = state.thoughts.len();
+    for line in contents.lines() {
+        let phrase: String = line.trim().chars().take(36).collect();
+        if !phrase.is_empty() && !state.thoughts.iter().any(|item| item == &phrase) {
+            state.thoughts.push(phrase);
+        }
+        if state.thoughts.len() >= 200 {
+            break;
+        }
+    }
+    if state.thoughts.len() > first_new {
+        state.thought_selected = first_new;
+        save_thoughts(state);
+        state.dirty_text = true;
+    }
+}
+
+fn phrase_preview(phrase: &str) -> String {
+    let mut preview: String = phrase.chars().take(18).collect();
+    if phrase.chars().count() > 18 {
+        preview.push('…');
+    }
+    preview
 }
 
 struct TextItem {
@@ -334,6 +652,8 @@ struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     text_items: Vec<TextItem>,
+    menu_text_start: usize,
+    menu_text_end: usize,
     thought_text_item: Option<usize>,
     thought_index: usize,
     uniform: Uniforms,
@@ -459,6 +779,8 @@ impl Renderer {
             atlas,
             text_renderer,
             text_items: Vec::new(),
+            menu_text_start: 0,
+            menu_text_end: 0,
             thought_text_item: None,
             thought_index: usize::MAX,
             uniform,
@@ -500,14 +822,20 @@ impl Renderer {
             _ => (Family::Name("Segoe UI"), Weight::LIGHT, -0.06),
         };
         let clock_top = height * 0.5 - 47.0 - clock_size * 0.53;
+        let display_hour = if state.use_24h {
+            now.hour()
+        } else {
+            let hour = now.hour() % 12;
+            if hour == 0 { 12 } else { hour }
+        };
         let parts: Vec<String> = if state.show_seconds {
             vec![
-                format!("{:02}", now.hour()),
+                format!("{display_hour:02}"),
                 format!("{:02}", now.minute()),
                 format!("{:02}", now.second()),
             ]
         } else {
-            vec![format!("{:02}", now.hour()), format!("{:02}", now.minute())]
+            vec![format!("{display_hour:02}"), format!("{:02}", now.minute())]
         };
         let mut built = Vec::new();
         for part in &parts {
@@ -537,7 +865,6 @@ impl Renderer {
                 x += sep_width;
             }
         }
-
         let eyebrow_size = (10.5 * central_scale).clamp(8.0, 13.0);
         self.push_centered(
             "A BEAUTIFUL WASTE OF TIME",
@@ -551,14 +878,31 @@ impl Renderer {
         );
         let date_y = clock_top + clock_size + 8.0 * central_scale;
         let weekday = WEEKDAYS[now.weekday().num_days_from_sunday() as usize];
-        self.push_centered(
-            &format!(
+        let date_text = match state.date_format {
+            1 => format!(
+                "{:04}-{:02}-{:02}　{}",
+                now.year(),
+                now.month(),
+                now.day(),
+                weekday
+            ),
+            2 => format!(
+                "{:04} / {:02} / {:02}　{}",
+                now.year(),
+                now.month(),
+                now.day(),
+                weekday
+            ),
+            _ => format!(
                 "{} 年 {:02} 月 {:02} 日　{}",
                 now.year(),
                 now.month(),
                 now.day(),
                 weekday
             ),
+        };
+        self.push_centered(
+            &date_text,
             width * 0.5,
             date_y,
             (16.0 * central_scale).clamp(12.0, 20.0),
@@ -568,11 +912,17 @@ impl Renderer {
             TextColor::rgba(245, 240, 235, 190),
         );
         let line_y = date_y + 62.0 * central_scale;
-        let (thought_index, alpha) = thought_visual(state.started.elapsed().as_secs_f32());
+        let (thought_index, alpha) = thought_visual(
+            state.started.elapsed().as_secs_f32(),
+            state.thought_duration,
+            state.thoughts.len(),
+            state.thought_random,
+        );
         if state.show_thoughts {
+            let thought = state.thoughts[thought_index].as_str();
             let thought_text_item = self.text_items.len();
             self.push_centered(
-                THOUGHTS[thought_index],
+                thought,
                 width * 0.5,
                 line_y + 40.0 * central_scale,
                 (19.0 * central_scale).clamp(14.0, 24.0),
@@ -587,32 +937,45 @@ impl Renderer {
 
         let layout = UiLayout::new(width, height, state.media_state > 0, true);
         let menu_offset = (state.menu_progress - 1.0) * (width * 0.28).clamp(260.0, 320.0);
+        let menu_y = -state.menu_scroll;
+        self.menu_text_start = self.text_items.len();
         if state.menu_open || state.menu_progress > 0.001 {
             let menu_color = TextColor::rgba(245, 240, 235, 212);
             self.push_text(
                 "SETTINGS",
                 25.0 + menu_offset,
-                80.0,
+                72.0,
                 20.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
                 0.30,
                 menu_color,
             );
+            self.menu_text_start = self.text_items.len();
             self.push_text(
-                "CLOCK STYLE",
+                "CLOCK",
                 25.0 + menu_offset,
-                144.0,
-                10.0,
+                132.0 + menu_y,
+                14.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
                 0.24,
                 menu_color,
             );
+            self.push_text(
+                "STYLE",
+                43.0 + menu_offset,
+                175.0 + menu_y,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.26,
+                menu_color,
+            );
             self.push_centered(
                 STYLE_NAMES[state.style],
                 layout.style.x + layout.style.w * 0.5 + menu_offset,
-                183.0,
+                210.0 + menu_y,
                 11.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
@@ -620,9 +983,89 @@ impl Renderer {
                 menu_color,
             );
             self.push_text(
+                "CLOCK SIZE",
+                43.0 + menu_offset,
+                253.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_right(
+                &format!("{:.0}%", state.clock_scale * 100.0),
+                layout.size.x + layout.size.w - 12.0 + menu_offset,
+                253.0 + menu_y,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_text(
+                "TIME FORMAT",
+                43.0 + menu_offset,
+                341.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                if state.use_24h { "24 HOUR" } else { "12 HOUR" },
+                layout.time_format.x + 13.0 + menu_offset,
+                374.0 + menu_y,
+                12.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                menu_color,
+            );
+            self.push_text(
+                "SHOW SECONDS",
+                43.0 + menu_offset,
+                421.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                if state.show_seconds { "ON" } else { "OFF" },
+                layout.seconds.x + 13.0 + menu_offset,
+                454.0 + menu_y,
+                13.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                menu_color,
+            );
+            self.push_text(
+                "DATE FORMAT",
+                43.0 + menu_offset,
+                501.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_centered(
+                DATE_FORMAT_NAMES[state.date_format],
+                layout.date_format.x + layout.date_format.w * 0.5 + menu_offset,
+                535.0 + menu_y,
+                11.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.22,
+                menu_color,
+            );
+            self.push_text(
                 "ANIMATION SPEED",
                 25.0 + menu_offset,
-                236.0,
+                592.0 + menu_y,
                 10.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
@@ -632,7 +1075,7 @@ impl Renderer {
             self.push_right(
                 &format!("{:.2}×", state.speed),
                 layout.speed.x + layout.speed.w - 24.0 + menu_offset,
-                236.0,
+                592.0 + menu_y,
                 9.5,
                 "Segoe UI",
                 Weight::SEMIBOLD,
@@ -640,49 +1083,19 @@ impl Renderer {
                 menu_color,
             );
             self.push_text(
-                "CLOCK SIZE",
+                "THOUGHTS",
                 25.0 + menu_offset,
-                328.0,
-                10.0,
+                682.0 + menu_y,
+                14.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
-                0.30,
-                menu_color,
-            );
-            self.push_right(
-                &format!("{:.0}%", state.clock_scale * 100.0),
-                layout.size.x + layout.size.w - 24.0 + menu_offset,
-                328.0,
-                9.5,
-                "Segoe UI",
-                Weight::SEMIBOLD,
-                0.14,
-                menu_color,
-            );
-            self.push_text(
-                "SHOW SECONDS",
-                25.0 + menu_offset,
-                420.0,
-                10.0,
-                "Segoe UI",
-                Weight::SEMIBOLD,
-                0.30,
-                menu_color,
-            );
-            self.push_text(
-                if state.show_seconds { "ON" } else { "OFF" },
-                layout.seconds.x + 18.0 + menu_offset,
-                458.0,
-                13.0,
-                "Segoe UI",
-                Weight::SEMIBOLD,
-                0.16,
+                0.24,
                 menu_color,
             );
             self.push_text(
                 "SHOW THOUGHTS",
-                25.0 + menu_offset,
-                512.0,
+                43.0 + menu_offset,
+                726.0 + menu_y,
                 10.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
@@ -691,17 +1104,209 @@ impl Renderer {
             );
             self.push_text(
                 if state.show_thoughts { "ON" } else { "OFF" },
-                layout.thoughts.x + 18.0 + menu_offset,
-                550.0,
+                layout.thoughts.x + 13.0 + menu_offset,
+                759.0 + menu_y,
                 13.0,
                 "Segoe UI",
                 Weight::SEMIBOLD,
                 0.16,
                 menu_color,
             );
+            self.push_text(
+                "CHANGE EVERY",
+                43.0 + menu_offset,
+                805.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_right(
+                &format!("{:.0} S", state.thought_duration),
+                layout.thought_interval.x + layout.thought_interval.w - 12.0 + menu_offset,
+                805.0 + menu_y,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_right(
+                &format!("{} PHRASES", state.thoughts.len()),
+                layout.thoughts.x + layout.thoughts.w + menu_offset,
+                685.0 + menu_y,
+                8.5,
+                "Segoe UI",
+                Weight::MEDIUM,
+                0.16,
+                TextColor::rgba(245, 240, 235, 124),
+            );
+            self.push_text(
+                "PLAYBACK ORDER",
+                43.0 + menu_offset,
+                891.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                if state.thought_random {
+                    "RANDOM"
+                } else {
+                    "SEQUENTIAL"
+                },
+                layout.thought_order.x + 13.0 + menu_offset,
+                922.0 + menu_y,
+                11.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_text(
+                "PHRASE LIBRARY",
+                43.0 + menu_offset,
+                971.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            self.push_text(
+                &phrase_preview(&state.thoughts[state.thought_selected]),
+                layout.thought_input.x + 13.0 + menu_offset,
+                1020.0 + menu_y,
+                10.5,
+                "HarmonyOS Sans SC",
+                Weight::NORMAL,
+                0.04,
+                menu_color,
+            );
+            self.push_centered(
+                "PREV",
+                layout.thought_prev.x + layout.thought_prev.w * 0.5 + menu_offset,
+                1073.0 + menu_y,
+                9.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_centered(
+                "DELETE",
+                layout.thought_delete.x + layout.thought_delete.w * 0.5 + menu_offset,
+                1073.0 + menu_y,
+                8.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.10,
+                menu_color,
+            );
+            self.push_centered(
+                "NEXT",
+                layout.thought_next.x + layout.thought_next.w * 0.5 + menu_offset,
+                1073.0 + menu_y,
+                9.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.14,
+                menu_color,
+            );
+            self.push_text(
+                "CUSTOM TEXT",
+                43.0 + menu_offset,
+                1117.0 + menu_y,
+                10.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.30,
+                menu_color,
+            );
+            let draft_label = if state.thought_draft.is_empty() {
+                "TYPE A PHRASE...".to_owned()
+            } else if state.editing_thought {
+                format!("{} |", state.thought_draft)
+            } else {
+                state.thought_draft.clone()
+            };
+            self.push_text(
+                &draft_label,
+                layout.thought_input.x + 13.0 + menu_offset,
+                1166.0 + menu_y,
+                10.5,
+                "HarmonyOS Sans SC",
+                Weight::NORMAL,
+                0.04,
+                if state.thought_draft.is_empty() {
+                    TextColor::rgba(245, 240, 235, 104)
+                } else {
+                    menu_color
+                },
+            );
+            self.push_centered(
+                "ADD PHRASE",
+                layout.thought_add.x + layout.thought_add.w * 0.5 + menu_offset,
+                1221.0 + menu_y,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                menu_color,
+            );
+            self.push_centered(
+                "IMPORT TXT",
+                layout.thought_import.x + layout.thought_import.w * 0.5 + menu_offset,
+                1221.0 + menu_y,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                menu_color,
+            );
+            self.push_text(
+                "DATA",
+                25.0 + menu_offset,
+                1294.0 + menu_y,
+                14.0,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.24,
+                menu_color,
+            );
+            let (delete_label, delete_color) = match state.delete_status {
+                DeleteStatus::Idle => ("DELETE USER FILES", menu_color),
+                DeleteStatus::Armed => (
+                    "CLICK AGAIN TO CONFIRM",
+                    TextColor::rgba(255, 194, 194, 232),
+                ),
+                DeleteStatus::Deleted => {
+                    ("USER FILES DELETED", TextColor::rgba(194, 240, 212, 224))
+                }
+                DeleteStatus::Failed => ("DELETE FAILED", TextColor::rgba(255, 178, 178, 232)),
+            };
+            self.push_centered(
+                delete_label,
+                layout.delete_user_files.x + layout.delete_user_files.w * 0.5 + menu_offset,
+                1340.0 + menu_y,
+                9.5,
+                "Segoe UI",
+                Weight::SEMIBOLD,
+                0.16,
+                delete_color,
+            );
         }
+        self.menu_text_end = self.text_items.len();
 
-        self.uniform.clock = [clock_top, clock_size, 0.0, 0.0];
+        self.uniform.clock = [
+            clock_top,
+            if state.thought_random { 1.0 } else { 0.0 },
+            if state.use_24h { 1.0 } else { 0.0 },
+            state.menu_scroll,
+        ];
         self.uniform.state = [
             if state.show_thoughts { line_y } else { -1000.0 },
             central_scale,
@@ -808,10 +1413,22 @@ impl Renderer {
         } else {
             state.menu_progress = menu_target;
         }
+        if let Some(deadline) = state.delete_status_until
+            && frame_time >= deadline
+        {
+            state.delete_status = DeleteStatus::Idle;
+            state.delete_status_until = None;
+            state.dirty_text = true;
+        }
 
         let now = Local::now();
         let elapsed = state.started.elapsed().as_secs_f32();
-        let (thought_index, thought_alpha) = thought_visual(elapsed);
+        let (thought_index, thought_alpha) = thought_visual(
+            elapsed,
+            state.thought_duration,
+            state.thoughts.len(),
+            state.thought_random,
+        );
         if now.second() != state.last_second {
             state.last_second = now.second();
             state.dirty_text = true;
@@ -848,8 +1465,9 @@ impl Renderer {
             speed_norm,
             size_norm,
             state.media_state as f32,
-            if state.fullscreen { 1.0 } else { 0.0 },
+            (state.thought_duration - 6.0) / 24.0,
         ];
+        self.uniform.clock[3] = state.menu_scroll;
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniform));
         self.viewport.update(
@@ -866,6 +1484,14 @@ impl Renderer {
             right: self.config.width as i32,
             bottom: self.config.height as i32,
         };
+        let menu_bounds = TextBounds {
+            left: 0,
+            top: (105.0 * scale) as i32,
+            right: ((self.logical_size[0] * 0.28).clamp(260.0, 320.0) * scale) as i32,
+            bottom: self.config.height as i32,
+        };
+        let menu_text_start = self.menu_text_start;
+        let menu_text_end = self.menu_text_end;
         self.text_renderer
             .prepare(
                 &self.device,
@@ -873,15 +1499,22 @@ impl Renderer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                self.text_items.iter().map(|item| TextArea {
-                    buffer: &item.buffer,
-                    left: item.left * scale,
-                    top: item.top * scale,
-                    scale,
-                    bounds,
-                    default_color: item.color,
-                    custom_glyphs: &[],
-                }),
+                self.text_items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| TextArea {
+                        buffer: &item.buffer,
+                        left: item.left * scale,
+                        top: item.top * scale,
+                        scale,
+                        bounds: if index >= menu_text_start && index < menu_text_end {
+                            menu_bounds
+                        } else {
+                            bounds
+                        },
+                        default_color: item.color,
+                        custom_glyphs: &[],
+                    }),
                 &mut self.swash_cache,
             )
             .expect("prepare text");
@@ -998,22 +1631,95 @@ impl Application {
             return;
         }
         let p = self.state.cursor;
+        let mut settings_p = p;
+        settings_p[1] += self.state.menu_scroll;
         let mut settings_changed = false;
+        if self.state.editing_thought && !layout.thought_input.contains(settings_p) {
+            self.state.editing_thought = false;
+            renderer.window.set_ime_allowed(false);
+            self.state.dirty_text = true;
+        }
         if layout.menu.contains(p) {
             self.state.menu_open = !self.state.menu_open;
+            if !self.state.menu_open {
+                self.state.editing_thought = false;
+                self.state.delete_status = DeleteStatus::Idle;
+                self.state.delete_status_until = None;
+                renderer.window.set_ime_allowed(false);
+            }
             self.state.dirty_text = true;
-        } else if layout.style.contains(p) {
+        } else if layout.style.contains(settings_p) {
             self.state.style = (self.state.style + 1) % STYLE_NAMES.len();
             self.state.dirty_text = true;
             settings_changed = true;
-        } else if layout.seconds.contains(p) {
+        } else if layout.time_format.contains(settings_p) {
+            self.state.use_24h = !self.state.use_24h;
+            self.state.dirty_text = true;
+            settings_changed = true;
+        } else if layout.seconds.contains(settings_p) {
             self.state.show_seconds = !self.state.show_seconds;
             self.state.dirty_text = true;
             settings_changed = true;
-        } else if layout.thoughts.contains(p) {
+        } else if layout.date_format.contains(settings_p) {
+            self.state.date_format = (self.state.date_format + 1) % DATE_FORMAT_NAMES.len();
+            self.state.dirty_text = true;
+            settings_changed = true;
+        } else if layout.thoughts.contains(settings_p) {
             self.state.show_thoughts = !self.state.show_thoughts;
             self.state.dirty_text = true;
             settings_changed = true;
+        } else if layout.thought_order.contains(settings_p) {
+            self.state.thought_random = !self.state.thought_random;
+            self.state.dirty_text = true;
+            settings_changed = true;
+        } else if layout.thought_prev.contains(settings_p) {
+            self.state.thought_selected = if self.state.thought_selected == 0 {
+                self.state.thoughts.len() - 1
+            } else {
+                self.state.thought_selected - 1
+            };
+            self.state.dirty_text = true;
+        } else if layout.thought_next.contains(settings_p) {
+            self.state.thought_selected =
+                (self.state.thought_selected + 1) % self.state.thoughts.len();
+            self.state.dirty_text = true;
+        } else if layout.thought_delete.contains(settings_p) {
+            if self.state.thoughts.len() > 1 {
+                self.state.thoughts.remove(self.state.thought_selected);
+                self.state.thought_selected = self
+                    .state
+                    .thought_selected
+                    .min(self.state.thoughts.len() - 1);
+                save_thoughts(&self.state);
+                self.state.dirty_text = true;
+            }
+        } else if layout.thought_input.contains(settings_p) {
+            self.state.editing_thought = true;
+            renderer.window.set_ime_allowed(true);
+            self.state.dirty_text = true;
+        } else if layout.thought_add.contains(settings_p) {
+            commit_thought(&mut self.state);
+        } else if layout.thought_import.contains(settings_p) {
+            import_thoughts_from_txt(&mut self.state);
+        } else if layout.delete_user_files.contains(settings_p) {
+            let now = Instant::now();
+            let confirmed = self.state.delete_status == DeleteStatus::Armed
+                && self
+                    .state
+                    .delete_status_until
+                    .is_some_and(|deadline| now < deadline);
+            if confirmed {
+                self.state.delete_status = if delete_user_files(&mut self.state) {
+                    DeleteStatus::Deleted
+                } else {
+                    DeleteStatus::Failed
+                };
+                self.state.delete_status_until = Some(now + Duration::from_secs(3));
+            } else {
+                self.state.delete_status = DeleteStatus::Armed;
+                self.state.delete_status_until = Some(now + Duration::from_secs(5));
+                self.state.dirty_text = true;
+            }
         } else if layout.fullscreen.contains(p) {
             self.state.fullscreen = !self.state.fullscreen;
             renderer.window.set_fullscreen(
@@ -1021,12 +1727,15 @@ impl Application {
                     .fullscreen
                     .then_some(Fullscreen::Borderless(None)),
             );
-        } else if layout.speed.contains(p) {
+        } else if layout.speed.contains(settings_p) {
             self.state.drag = Some(DragTarget::Speed);
-            update_slider(&mut self.state, layout, p);
-        } else if layout.size.contains(p) {
+            update_slider(&mut self.state, layout, settings_p);
+        } else if layout.size.contains(settings_p) {
             self.state.drag = Some(DragTarget::Size);
-            update_slider(&mut self.state, layout, p);
+            update_slider(&mut self.state, layout, settings_p);
+        } else if layout.thought_interval.contains(settings_p) {
+            self.state.drag = Some(DragTarget::ThoughtInterval);
+            update_slider(&mut self.state, layout, settings_p);
         } else if layout.previous.contains(p) {
             send_media_key(MediaKey::Previous)
         } else if layout.playback.contains(p) {
@@ -1035,6 +1744,8 @@ impl Application {
             send_media_key(MediaKey::Next)
         } else if self.state.menu_open && !layout.menu_panel.contains(p) {
             self.state.menu_open = false;
+            self.state.delete_status = DeleteStatus::Idle;
+            self.state.delete_status_until = None;
             self.state.dirty_text = true;
         }
         if settings_changed {
@@ -1113,23 +1824,72 @@ impl ApplicationHandler<UserEvent> for Application {
                     update_slider(&mut self.state, layout, cursor);
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } if self.state.menu_open => {
+                let panel_width = (renderer.logical_size[0] * 0.28).clamp(260.0, 320.0);
+                if self.state.cursor[0] <= panel_width {
+                    let amount = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => -y * 52.0,
+                        MouseScrollDelta::PixelDelta(position) => {
+                            -(position.y as f32 / renderer.scale_factor)
+                        }
+                    };
+                    let max_scroll = (1397.0 - (renderer.logical_size[1] - 24.0)).max(0.0);
+                    self.state.menu_scroll =
+                        (self.state.menu_scroll + amount).clamp(0.0, max_scroll);
+                    self.state.dirty_text = true;
+                }
+            }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
             } => self.interact(state == ElementState::Pressed),
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.state.control_down = modifiers.state().control_key();
+            }
+            WindowEvent::Ime(Ime::Commit(value)) if self.state.editing_thought => {
+                append_thought_draft(&mut self.state, &value);
+            }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                match event.logical_key {
-                    Key::Character(ref value) if value.eq_ignore_ascii_case("s") => {
-                        self.state.style = (self.state.style + 1) % STYLE_NAMES.len();
-                        self.state.dirty_text = true;
-                        save_settings(&self.state);
+                if self.state.editing_thought {
+                    match event.logical_key {
+                        Key::Named(NamedKey::Backspace) => {
+                            self.state.thought_draft.pop();
+                            self.state.dirty_text = true;
+                        }
+                        Key::Named(NamedKey::Enter) => {
+                            commit_thought(&mut self.state);
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            self.state.editing_thought = false;
+                            renderer.window.set_ime_allowed(false);
+                            self.state.dirty_text = true;
+                        }
+                        Key::Character(ref value)
+                            if self.state.control_down && value.eq_ignore_ascii_case("v") =>
+                        {
+                            if let Some(text) = clipboard_text() {
+                                append_thought_draft(&mut self.state, &text);
+                            }
+                        }
+                        Key::Character(ref value) => {
+                            append_thought_draft(&mut self.state, value);
+                        }
+                        _ => {}
                     }
-                    Key::Named(NamedKey::Escape) if self.state.fullscreen => {
-                        self.state.fullscreen = false;
-                        renderer.window.set_fullscreen(None);
+                } else {
+                    match event.logical_key {
+                        Key::Character(ref value) if value.eq_ignore_ascii_case("s") => {
+                            self.state.style = (self.state.style + 1) % STYLE_NAMES.len();
+                            self.state.dirty_text = true;
+                            save_settings(&self.state);
+                        }
+                        Key::Named(NamedKey::Escape) if self.state.fullscreen => {
+                            self.state.fullscreen = false;
+                            renderer.window.set_fullscreen(None);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
             WindowEvent::RedrawRequested => renderer.render(&mut self.state),
@@ -1148,6 +1908,13 @@ fn update_slider(state: &mut AppState, layout: UiLayout, point: [f32; 2]) {
         Some(DragTarget::Size) => {
             let t = ((point[0] - (layout.size.x + 18.0)) / (layout.size.w - 36.0)).clamp(0.0, 1.0);
             state.clock_scale = 0.70 + t * 0.65;
+            state.dirty_text = true;
+        }
+        Some(DragTarget::ThoughtInterval) => {
+            let t = ((point[0] - (layout.thought_interval.x + 18.0))
+                / (layout.thought_interval.w - 36.0))
+                .clamp(0.0, 1.0);
+            state.thought_duration = 6.0 + t * 24.0;
             state.dirty_text = true;
         }
         None => {}

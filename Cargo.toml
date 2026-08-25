@@ -1,6 +1,6 @@
 [package]
 name = "beautiful-waste"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 description = "A beautiful waste of time — native WGPU ambient clock"
 license = "MIT"
@@ -12,12 +12,16 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 glyphon = "0.12"
 image = { version = "0.25", default-features = false, features = ["ico"] }
 pollster = "0.4"
+rfd = "0.15"
 wgpu = "30"
 winit = "0.30"
 windows = { version = "0.61", features = [
     "Foundation",
     "Media_Control",
+    "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
     "Win32_UI_Input_KeyboardAndMouse",
 ] }
 

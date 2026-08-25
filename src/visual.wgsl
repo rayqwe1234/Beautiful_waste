@@ -147,44 +147,91 @@ fn fs_main(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     let menu_open = menu_progress > 0.5;
     let panel_w = clamp(size.x * 0.28, 260.0, 320.0);
     let panel_offset = (menu_progress - 1.0) * panel_w;
-    let menu_point = point - vec2<f32>(panel_offset, 0.0);
+    let panel_point = point - vec2<f32>(panel_offset, 0.0);
+    let menu_point = panel_point + vec2<f32>(0.0, u.clock.w);
     if menu_progress > 0.001 {
-        let panel_mask = 1.0 - smoothstep(panel_w - 1.5, panel_w + 1.5, menu_point.x);
+        let scene_color = color;
+        let panel_mask = 1.0 - smoothstep(panel_w - 1.5, panel_w + 1.5, panel_point.x);
         color = mix(color, vec3<f32>(0.025, 0.028, 0.060), panel_mask * 0.76);
-        color = draw_line(color, menu_point, vec2<f32>(panel_w, 0.0), vec2<f32>(panel_w, size.y), 1.0, 0.28);
 
-        let row_half = vec2<f32>(panel_w * 0.5 - 24.0, 24.0);
-        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 190.0), row_half, 16.0);
-        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 282.0), row_half, 16.0);
-        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 374.0), row_half, 16.0);
-        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 466.0), row_half, 16.0);
-        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 558.0), row_half, 16.0);
+        let clock_group_half = vec2<f32>(panel_w * 0.5 - 24.0, 209.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 369.0), clock_group_half, 20.0);
 
-        let track_a = vec2<f32>(42.0, 282.0);
-        let track_b = vec2<f32>(panel_w - 42.0, 282.0);
+        let clock_row_half = vec2<f32>(panel_w * 0.5 - 36.0, 20.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 216.0), clock_row_half, 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 298.0), vec2<f32>(clock_row_half.x, 28.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 383.0), vec2<f32>(clock_row_half.x, 21.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 463.0), vec2<f32>(clock_row_half.x, 21.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 541.0), vec2<f32>(clock_row_half.x, 21.0), 13.0);
+
+        let outside_row_half = vec2<f32>(panel_w * 0.5 - 24.0, 28.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 642.0), outside_row_half, 16.0);
+
+        let thought_group_half = vec2<f32>(panel_w * 0.5 - 24.0, 278.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 988.0), thought_group_half, 20.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 768.0), vec2<f32>(clock_row_half.x, 21.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 850.0), vec2<f32>(clock_row_half.x, 28.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 931.0), vec2<f32>(clock_row_half.x, 21.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 1025.0), vec2<f32>(clock_row_half.x, 28.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 1171.0), vec2<f32>(clock_row_half.x, 28.0), 13.0);
+        let library_button_half_w = (panel_w - 88.0) / 6.0;
+        color = overlay_round_rect(color, menu_point, vec2<f32>(36.0 + library_button_half_w, 1080.0), vec2<f32>(library_button_half_w, 21.0), 12.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(44.0 + library_button_half_w * 3.0, 1080.0), vec2<f32>(library_button_half_w, 21.0), 12.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(52.0 + library_button_half_w * 5.0, 1080.0), vec2<f32>(library_button_half_w, 21.0), 12.0);
+        let thought_button_half_w = (panel_w - 84.0) * 0.25;
+        color = overlay_round_rect(color, menu_point, vec2<f32>(36.0 + thought_button_half_w, 1227.0), vec2<f32>(thought_button_half_w, 22.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w - 36.0 - thought_button_half_w, 1227.0), vec2<f32>(thought_button_half_w, 22.0), 13.0);
+        color = overlay_round_rect(color, menu_point, vec2<f32>(panel_w * 0.5, 1347.0), vec2<f32>(panel_w * 0.5 - 24.0, 26.0), 15.0);
+
+        let track_a = vec2<f32>(42.0, 642.0);
+        let track_b = vec2<f32>(panel_w - 42.0, 642.0);
         color = draw_line(color, menu_point, track_a, track_b, 1.25, 0.44);
         let speed_thumb = mix(track_a.x, track_b.x, u.controls.x);
-        let sm = 1.0 - smoothstep(6.0, 7.0, distance(menu_point, vec2<f32>(speed_thumb, 282.0)));
+        let sm = 1.0 - smoothstep(6.0, 7.0, distance(menu_point, vec2<f32>(speed_thumb, 642.0)));
         color = mix(color, vec3<f32>(0.86, 0.76, 1.0), sm);
 
-        let size_track_a = vec2<f32>(42.0, 374.0);
-        let size_track_b = vec2<f32>(panel_w - 42.0, 374.0);
+        let thought_track_a = vec2<f32>(54.0, 850.0);
+        let thought_track_b = vec2<f32>(panel_w - 54.0, 850.0);
+        color = draw_line(color, menu_point, thought_track_a, thought_track_b, 1.25, 0.44);
+        let thought_thumb = mix(thought_track_a.x, thought_track_b.x, u.controls.w);
+        let thought_thumb_mask = 1.0 - smoothstep(6.0, 7.0, distance(menu_point, vec2<f32>(thought_thumb, 850.0)));
+        color = mix(color, vec3<f32>(0.86, 0.76, 1.0), thought_thumb_mask);
+
+        let size_track_a = vec2<f32>(54.0, 298.0);
+        let size_track_b = vec2<f32>(panel_w - 54.0, 298.0);
         color = draw_line(color, menu_point, size_track_a, size_track_b, 1.25, 0.44);
         let size_thumb = mix(size_track_a.x, size_track_b.x, u.controls.y);
-        let zm = 1.0 - smoothstep(6.0, 7.0, distance(menu_point, vec2<f32>(size_thumb, 374.0)));
+        let zm = 1.0 - smoothstep(6.0, 7.0, distance(menu_point, vec2<f32>(size_thumb, 298.0)));
         color = mix(color, vec3<f32>(0.86, 0.76, 1.0), zm);
 
-        let toggle_center = vec2<f32>(panel_w - 57.0, 466.0);
+        let format_toggle_center = vec2<f32>(panel_w - 64.0, 383.0);
+        color = overlay_round_rect(color, menu_point, format_toggle_center, vec2<f32>(15.0, 8.0), 8.0);
+        let format_toggle_x = format_toggle_center.x + mix(-7.0, 7.0, u.clock.z);
+        let format_toggle_mask = 1.0 - smoothstep(5.0, 6.0, distance(menu_point, vec2<f32>(format_toggle_x, 383.0)));
+        color = mix(color, vec3<f32>(0.92, 0.89, 0.98), format_toggle_mask);
+
+        let toggle_center = vec2<f32>(panel_w - 64.0, 463.0);
         color = overlay_round_rect(color, menu_point, toggle_center, vec2<f32>(15.0, 8.0), 8.0);
         let toggle_x = toggle_center.x + mix(-7.0, 7.0, u.animation.w);
-        let tm = 1.0 - smoothstep(5.0, 6.0, distance(menu_point, vec2<f32>(toggle_x, 466.0)));
+        let tm = 1.0 - smoothstep(5.0, 6.0, distance(menu_point, vec2<f32>(toggle_x, 463.0)));
         color = mix(color, vec3<f32>(0.92, 0.89, 0.98), tm);
 
-        let thought_toggle_center = vec2<f32>(panel_w - 57.0, 558.0);
+        let thought_toggle_center = vec2<f32>(panel_w - 64.0, 768.0);
         color = overlay_round_rect(color, menu_point, thought_toggle_center, vec2<f32>(15.0, 8.0), 8.0);
         let thought_toggle_x = thought_toggle_center.x + mix(-7.0, 7.0, u.state.z);
-        let thought_toggle_mask = 1.0 - smoothstep(5.0, 6.0, distance(menu_point, vec2<f32>(thought_toggle_x, 558.0)));
+        let thought_toggle_mask = 1.0 - smoothstep(5.0, 6.0, distance(menu_point, vec2<f32>(thought_toggle_x, 768.0)));
         color = mix(color, vec3<f32>(0.92, 0.89, 0.98), thought_toggle_mask);
+
+        let order_toggle_center = vec2<f32>(panel_w - 64.0, 931.0);
+        color = overlay_round_rect(color, menu_point, order_toggle_center, vec2<f32>(15.0, 8.0), 8.0);
+        let order_toggle_x = order_toggle_center.x + mix(-7.0, 7.0, u.clock.y);
+        let order_toggle_mask = 1.0 - smoothstep(5.0, 6.0, distance(menu_point, vec2<f32>(order_toggle_x, 931.0)));
+        color = mix(color, vec3<f32>(0.92, 0.89, 0.98), order_toggle_mask);
+
+        let clean_panel = mix(scene_color, vec3<f32>(0.025, 0.028, 0.060), panel_mask * 0.76);
+        let top_content_fade = smoothstep(78.0, 132.0, panel_point.y);
+        color = mix(clean_panel, color, top_content_fade);
+        color = draw_line(color, panel_point, vec2<f32>(panel_w, 0.0), vec2<f32>(panel_w, size.y), 1.0, 0.28);
     }
 
     let line_half=105.0*u.state.y;
