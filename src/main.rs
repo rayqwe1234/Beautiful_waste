@@ -22,6 +22,8 @@ use wgpu::{
     TextureFormat, TextureUsages, TextureViewDescriptor,
     util::{BufferInitDescriptor, DeviceExt},
 };
+#[cfg(target_os = "windows")]
+use winit::platform::windows::WindowAttributesExtWindows;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
@@ -1764,7 +1766,11 @@ impl ApplicationHandler<UserEvent> for Application {
             .with_inner_size(LogicalSize::new(1280.0, 800.0))
             .with_min_inner_size(LogicalSize::new(520.0, 620.0));
         if let Some(icon) = load_icon() {
-            attrs = attrs.with_window_icon(Some(icon));
+            attrs = attrs.with_window_icon(Some(icon.clone()));
+            #[cfg(target_os = "windows")]
+            {
+                attrs = attrs.with_taskbar_icon(Some(icon));
+            }
         }
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         self.renderer = Some(pollster::block_on(Renderer::new(window, event_loop)));

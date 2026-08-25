@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.1 — 2026-08-25
+
+- Fixed the Windows taskbar icon by assigning the application icon to both the window and taskbar icon slots.
+
 ## v1.1.0 — 2026-08-25
 
 - Added a unified, scrollable settings interface with dedicated CLOCK, THOUGHTS, and DATA sections.
