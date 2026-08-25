@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.5 — 2026-08-25
+
+- Replaced the Windows-recognized fullscreen path with a fast overscanned borderless presentation.
+- Prevent display-driver, VRR, HDR, or independent-flip mode changes when using the top-right fullscreen button.
+- Preserve the previous window position, size, and maximized state when leaving fullscreen.
+
 ## v1.1.4 — 2026-08-25
 
 - Removed the long black frame when entering or leaving borderless fullscreen.

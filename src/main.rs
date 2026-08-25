@@ -28,11 +28,11 @@ use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalPosition},
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     keyboard::{Key, NamedKey},
-    window::{Fullscreen, Icon, Window},
+    window::{Icon, Window, WindowLevel},
 };
 
 const THOUGHTS: [&str; 24] = [
@@ -1643,6 +1643,65 @@ struct Application {
     renderer: Option<Renderer>,
     state: AppState,
     proxy: EventLoopProxy<UserEvent>,
+    windowed_placement: Option<WindowedPlacement>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowedPlacement {
+    position: PhysicalPosition<i32>,
+    inner_size: PhysicalSize<u32>,
+    maximized: bool,
+}
+
+fn set_fast_fullscreen(
+    renderer: &mut Renderer,
+    saved: &mut Option<WindowedPlacement>,
+    fullscreen: bool,
+) {
+    let window = &renderer.window;
+    renderer.occluded = false;
+
+    if fullscreen {
+        let Ok(position) = window.outer_position() else {
+            return;
+        };
+        *saved = Some(WindowedPlacement {
+            position,
+            inner_size: window.inner_size(),
+            maximized: window.is_maximized(),
+        });
+
+        if window.is_maximized() {
+            window.set_maximized(false);
+        }
+        window.set_decorations(false);
+        window.set_window_level(WindowLevel::AlwaysOnTop);
+
+        if let Some(monitor) = window.current_monitor() {
+            let position = monitor.position();
+            let size = monitor.size();
+            // Overscan by one physical pixel on every edge. The window still
+            // looks exactly fullscreen, but Windows no longer classifies it as
+            // a display-mode fullscreen surface and therefore does not switch
+            // the monitor/driver presentation path.
+            window.set_outer_position(PhysicalPosition::new(position.x - 1, position.y - 1));
+            let _ = window.request_inner_size(PhysicalSize::new(
+                size.width.saturating_add(2),
+                size.height.saturating_add(2),
+            ));
+        }
+    } else if let Some(placement) = saved.take() {
+        window.set_window_level(WindowLevel::Normal);
+        window.set_decorations(true);
+        window.set_maximized(false);
+        window.set_outer_position(placement.position);
+        let _ = window.request_inner_size(placement.inner_size);
+        if placement.maximized {
+            window.set_maximized(true);
+        }
+    }
+
+    window.request_redraw();
 }
 
 impl Application {
@@ -1754,13 +1813,11 @@ impl Application {
             }
         } else if layout.fullscreen.contains(p) {
             self.state.fullscreen = !self.state.fullscreen;
-            renderer.occluded = false;
-            renderer.window.set_fullscreen(
-                self.state
-                    .fullscreen
-                    .then_some(Fullscreen::Borderless(None)),
+            set_fast_fullscreen(
+                renderer,
+                &mut self.windowed_placement,
+                self.state.fullscreen,
             );
-            renderer.window.request_redraw();
         } else if layout.speed.contains(settings_p) {
             self.state.drag = Some(DragTarget::Speed);
             update_slider(&mut self.state, layout, settings_p);
@@ -1947,9 +2004,7 @@ impl ApplicationHandler<UserEvent> for Application {
                         }
                         Key::Named(NamedKey::Escape) if self.state.fullscreen => {
                             self.state.fullscreen = false;
-                            renderer.occluded = false;
-                            renderer.window.set_fullscreen(None);
-                            renderer.window.request_redraw();
+                            set_fast_fullscreen(renderer, &mut self.windowed_placement, false);
                         }
                         _ => {}
                     }
@@ -2127,6 +2182,7 @@ fn main() {
         renderer: None,
         state: AppState::load_from_disk(),
         proxy,
+        windowed_placement: None,
     };
     event_loop.run_app(&mut app).unwrap();
 }
