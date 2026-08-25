@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.4 — 2026-08-25
+
+- Removed the long black frame when entering or leaving borderless fullscreen.
+- Ignore transient Windows occlusion notifications unless the window is actually minimized.
+- Preserve usable suboptimal WGPU frames during fullscreen surface transitions.
+
 ## v1.1.3 — 2026-08-25
 
 - Fixed a WGPU validation crash that occurred shortly after minimizing the window.

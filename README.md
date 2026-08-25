@@ -23,7 +23,7 @@ Beautiful Waste 是用 Rust 原生构建的桌面待机应用。WGPU 着色器�
 
 ## 下载与运行
 
-从 [Releases](../../releases) 下载 `Beautiful-Waste-v1.1.3-windows-x64.zip`，解压后直接运行 `beautiful-waste.exe`。
+从 [Releases](../../releases) 下载 `Beautiful-Waste-v1.1.4-windows-x64.zip`，解压后直接运行 `beautiful-waste.exe`。
 
 支持 Windows 10/11，并需要可用的 DirectX 12 或 Vulkan 图形驱动。
 

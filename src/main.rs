@@ -811,7 +811,12 @@ impl Renderer {
         self.config.height = height;
         self.scale_factor = scale_factor;
         self.logical_size = [width as f32 / scale_factor, height as f32 / scale_factor];
-        if !self.occluded {
+        // A borderless-fullscreen transition can briefly emit Occluded(true)
+        // even though the window is still visible. Only suppress surface work
+        // for a real minimization, otherwise the newly exposed area stays black
+        // until Windows eventually emits Occluded(false).
+        if !self.window.is_minimized().unwrap_or(false) {
+            self.occluded = false;
             self.surface.configure(&self.device, &self.config);
         }
     }
@@ -1534,26 +1539,23 @@ impl Renderer {
             )
             .expect("prepare text");
         let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout => {
                 self.window.request_redraw();
                 return;
             }
             wgpu::CurrentSurfaceTexture::Occluded => {
-                self.occluded = true;
+                // During a fullscreen style change this result is transient.
+                // Keep asking for a frame instead of waiting for a delayed
+                // WindowEvent::Occluded(false).
+                self.occluded = self.window.is_minimized().unwrap_or(false);
+                if !self.occluded {
+                    self.window.request_redraw();
+                }
                 return;
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                self.window.request_redraw();
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
-                drop(frame);
-                if self.window.is_minimized().unwrap_or(false) {
-                    self.occluded = true;
-                    return;
-                }
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
                 return;
@@ -1752,11 +1754,13 @@ impl Application {
             }
         } else if layout.fullscreen.contains(p) {
             self.state.fullscreen = !self.state.fullscreen;
+            renderer.occluded = false;
             renderer.window.set_fullscreen(
                 self.state
                     .fullscreen
                     .then_some(Fullscreen::Borderless(None)),
             );
+            renderer.window.request_redraw();
         } else if layout.speed.contains(settings_p) {
             self.state.drag = Some(DragTarget::Speed);
             update_slider(&mut self.state, layout, settings_p);
@@ -1847,8 +1851,11 @@ impl ApplicationHandler<UserEvent> for Application {
                 self.state.dirty_text = true;
             }
             WindowEvent::Occluded(occluded) => {
-                renderer.occluded = occluded;
-                if !occluded {
+                // Windows reports a short-lived occlusion while changing the
+                // borderless-fullscreen window style. Treat it as suspended
+                // rendering only when the window is actually minimized.
+                renderer.occluded = occluded && renderer.window.is_minimized().unwrap_or(false);
+                if !renderer.occluded {
                     let size = renderer.window.inner_size();
                     renderer.resize(
                         size.width,
@@ -1940,7 +1947,9 @@ impl ApplicationHandler<UserEvent> for Application {
                         }
                         Key::Named(NamedKey::Escape) if self.state.fullscreen => {
                             self.state.fullscreen = false;
+                            renderer.occluded = false;
                             renderer.window.set_fullscreen(None);
+                            renderer.window.request_redraw();
                         }
                         _ => {}
                     }
