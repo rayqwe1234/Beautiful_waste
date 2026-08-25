@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.3 — 2026-08-25
+
+- Fixed a WGPU validation crash that occurred shortly after minimizing the window.
+- Pause rendering while minimized or occluded, then safely reconfigure and resume after restore.
+- Drop suboptimal surface frames before reconfiguring the presentation surface.
+
 ## v1.1.2 — 2026-08-25
 
 - Fixed the taskbar icon for portable copies launched directly from File Explorer.

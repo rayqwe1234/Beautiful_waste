@@ -663,6 +663,8 @@ struct Renderer {
     uniform: Uniforms,
     logical_size: [f32; 2],
     scale_factor: f32,
+    occluded: bool,
+    has_valid_size: bool,
     window: Arc<Window>,
 }
 
@@ -793,19 +795,25 @@ impl Renderer {
                 physical.height as f32 / scale_factor,
             ],
             scale_factor,
+            occluded: false,
+            has_valid_size: physical.width > 0 && physical.height > 0,
             window,
         }
     }
 
     fn resize(&mut self, width: u32, height: u32, scale_factor: f32) {
         if width == 0 || height == 0 {
+            self.has_valid_size = false;
             return;
         }
+        self.has_valid_size = true;
         self.config.width = width;
         self.config.height = height;
         self.scale_factor = scale_factor;
         self.logical_size = [width as f32 / scale_factor, height as f32 / scale_factor];
-        self.surface.configure(&self.device, &self.config);
+        if !self.occluded {
+            self.surface.configure(&self.device, &self.config);
+        }
     }
 
     fn build_text(&mut self, state: &AppState) {
@@ -1403,6 +1411,9 @@ impl Renderer {
     }
 
     fn render(&mut self, state: &mut AppState) {
+        if !self.has_valid_size || self.occluded || self.window.is_minimized().unwrap_or(false) {
+            return;
+        }
         let frame_time = Instant::now();
         let delta = frame_time
             .duration_since(state.last_frame)
@@ -1524,11 +1535,25 @@ impl Renderer {
             .expect("prepare text");
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
                 self.window.request_redraw();
                 return;
             }
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                self.occluded = true;
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return;
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                drop(frame);
+                if self.window.is_minimized().unwrap_or(false) {
+                    self.occluded = true;
+                    return;
+                }
                 self.surface.configure(&self.device, &self.config);
                 self.window.request_redraw();
                 return;
@@ -1536,6 +1561,7 @@ impl Renderer {
             wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface = self.instance.create_surface(self.window.clone()).unwrap();
                 self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
                 return;
             }
             wgpu::CurrentSurfaceTexture::Validation => panic!("surface validation error"),
@@ -1819,6 +1845,19 @@ impl ApplicationHandler<UserEvent> for Application {
                 let size = renderer.window.inner_size();
                 renderer.resize(size.width, size.height, scale_factor as f32);
                 self.state.dirty_text = true;
+            }
+            WindowEvent::Occluded(occluded) => {
+                renderer.occluded = occluded;
+                if !occluded {
+                    let size = renderer.window.inner_size();
+                    renderer.resize(
+                        size.width,
+                        size.height,
+                        renderer.window.scale_factor() as f32,
+                    );
+                    self.state.dirty_text = true;
+                    renderer.window.request_redraw();
+                }
             }
             WindowEvent::CursorMoved {
                 position: PhysicalPosition { x, y },
