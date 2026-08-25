@@ -1,6 +1,6 @@
 [package]
 name = "beautiful-waste"
-version = "1.1.1"
+version = "1.1.2"
 edition = "2024"
 description = "A beautiful waste of time — native WGPU ambient clock"
 license = "MIT"
@@ -20,9 +20,13 @@ windows = { version = "0.61", features = [
     "Media_Control",
     "Win32_Foundation",
     "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
     "Win32_System_Memory",
+    "Win32_System_Variant",
     "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
 ] }
 
 [build-dependencies]

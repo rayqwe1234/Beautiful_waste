@@ -23,7 +23,9 @@ use wgpu::{
     util::{BufferInitDescriptor, DeviceExt},
 };
 #[cfg(target_os = "windows")]
-use winit::platform::windows::WindowAttributesExtWindows;
+use winit::platform::windows::{WindowAttributesExtWindows, WindowExtWindows};
+#[cfg(target_os = "windows")]
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition},
@@ -1773,6 +1775,13 @@ impl ApplicationHandler<UserEvent> for Application {
             }
         }
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        #[cfg(target_os = "windows")]
+        if let Some(icon) = load_icon() {
+            window.set_window_icon(Some(icon.clone()));
+            window.set_taskbar_icon(Some(icon));
+        }
+        #[cfg(target_os = "windows")]
+        configure_windows_window_identity(&window);
         self.renderer = Some(pollster::block_on(Renderer::new(window, event_loop)));
         start_media_monitor(self.proxy.clone());
     }
@@ -1935,6 +1944,51 @@ fn load_icon() -> Option<Icon> {
     Icon::from_rgba(image.into_raw(), w, h).ok()
 }
 
+#[cfg(target_os = "windows")]
+fn configure_windows_window_identity(window: &Window) {
+    use windows::{
+        Win32::{
+            Foundation::{HWND, PROPERTYKEY},
+            System::Com::StructuredStorage::PROPVARIANT,
+            UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow},
+        },
+        core::GUID,
+    };
+
+    const APP_ID: &str = "ShenChengrui.BeautifulWaste";
+    const PKEY_APP_USER_MODEL_ID: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 5,
+    };
+    const PKEY_APP_USER_MODEL_RELAUNCH_ICON_RESOURCE: PROPERTYKEY = PROPERTYKEY {
+        fmtid: GUID::from_u128(0x9f4c2855_9f79_4b39_a8d0_e1d42de1d5f3),
+        pid: 3,
+    };
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = HWND(handle.hwnd.get() as *mut _);
+    let Ok(executable) = env::current_exe() else {
+        return;
+    };
+    let icon_resource = format!("{},0", executable.display());
+
+    unsafe {
+        let Ok(store) = SHGetPropertyStoreForWindow::<IPropertyStore>(hwnd) else {
+            return;
+        };
+        let app_id = PROPVARIANT::from(APP_ID);
+        let icon_resource = PROPVARIANT::from(icon_resource.as_str());
+        let _ = store.SetValue(&PKEY_APP_USER_MODEL_ID, &app_id);
+        let _ = store.SetValue(&PKEY_APP_USER_MODEL_RELAUNCH_ICON_RESOURCE, &icon_resource);
+        let _ = store.Commit();
+    }
+}
+
 fn start_media_monitor(proxy: EventLoopProxy<UserEvent>) {
     thread::spawn(move || {
         #[cfg(target_os = "windows")]
@@ -2013,6 +2067,12 @@ fn send_media_key(key: MediaKey) {
 fn send_media_key(_: MediaKey) {}
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let _ = windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID(
+            windows::core::w!("ShenChengrui.BeautifulWaste"),
+        );
+    }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().unwrap();
     let proxy = event_loop.create_proxy();
     let mut app = Application {

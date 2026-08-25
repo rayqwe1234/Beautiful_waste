@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.1.2 — 2026-08-25
+
+- Fixed the taskbar icon for portable copies launched directly from File Explorer.
+- Added a stable Windows AppUserModelID and explicit relaunch icon resource.
+- Reapplied the window and taskbar icons after native window creation.
+
 ## v1.1.1 — 2026-08-25
 
 - Fixed the Windows taskbar icon by assigning the application icon to both the window and taskbar icon slots.
